@@ -1,0 +1,9 @@
+@import "tailwindcss";
+@import "../shared/theme.css";
+
+@source not "../extension";
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+}

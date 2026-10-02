@@ -1,0 +1,60 @@
+{
+  "name": "replyline",
+  "version": "0.1.0",
+  "private": true,
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "workspaces": [
+    "extension"
+  ],
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint",
+    "typecheck": "tsc --noEmit && npm run typecheck -w extension",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "format": "prettier --write .",
+    "db:up": "docker compose up -d",
+    "db:down": "docker compose down",
+    "db:migrate": "prisma migrate dev",
+    "db:deploy": "prisma migrate deploy",
+    "db:generate": "prisma generate",
+    "db:studio": "prisma studio",
+    "pilot:create-account": "tsx scripts/create-pilot-account.ts",
+    "ext:dev": "npm run dev -w extension",
+    "ext:build": "npm run build -w extension",
+    "check": "npm run typecheck && npm run lint && npm test && npm run build && npm run ext:build",
+    "postinstall": "prisma generate"
+  },
+  "dependencies": {
+    "@google/genai": "2.24.0",
+    "@prisma/adapter-pg": "7.10.0",
+    "@prisma/client": "7.10.0",
+    "bcryptjs": "3.0.3",
+    "next": "16.3.7",
+    "next-auth": "5.0.0-beta.32",
+    "pg": "8.23.0",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "4.3.3",
+    "@types/node": "24.19.0",
+    "@types/pg": "8.23.1",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "dotenv": "18.0.4",
+    "eslint": "9.39.5",
+    "eslint-config-next": "16.3.7",
+    "prettier": "3.9.9",
+    "prisma": "7.10.0",
+    "tailwindcss": "4.3.3",
+    "tsx": "4.23.15",
+    "typescript": "5.9.3",
+    "vitest": "5.0.2"
+  }
+}

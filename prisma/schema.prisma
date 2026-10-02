@@ -1,0 +1,395 @@
+// Replyline data model — Phase 2 subset (see IMPLEMENTATION_PLAN.md §4).
+//
+// Tenant rule: every customer-owned row carries `workspaceId`, and every
+// server read of tenant data is scoped by membership (lib/workspace-access.ts).
+// Reddit-derived text (Draft.capturedText) has a retention TTL and is purged by
+// POST /api/jobs/purge-expired (lib/retention.ts).
+
+generator client {
+  provider = "prisma-client"
+  output   = "../lib/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Role {
+  OWNER
+  ADMIN
+  MEMBER
+  VIEWER
+}
+
+enum LinkPolicy {
+  NEVER
+  ALLOWED_DOMAINS
+}
+
+enum PairingStatus {
+  PENDING
+  APPROVED
+  DENIED
+  CONSUMED
+  EXPIRED
+}
+
+enum DraftChannel {
+  EXTENSION
+  DASHBOARD
+}
+
+enum FeedbackRating {
+  UP
+  DOWN
+}
+
+/// Where a conversation came from: user capture via extension/dashboard, manual
+/// paste, or (future) Reddit Data API (gated until approved).
+enum ConversationSource {
+  CAPTURE
+  MANUAL
+  REDDIT_DATA_API
+}
+
+/// Opportunity pipeline stage. "Manually Contacted" and "Follow-up" coexist so a
+/// thread can advance back to follow-up after a non-answer.
+enum OpportunityStage {
+  NEW
+  REVIEWING
+  DRAFT_READY
+  MANUALLY_CONTACTED
+  FOLLOW_UP
+  QUALIFIED
+  CLOSED
+  IRRELEVANT
+}
+
+/// Watchlist type. KEYWORD tracks a phrase; COMPETITOR tracks a competitor brand.
+enum WatchlistType {
+  KEYWORD
+  COMPETITOR
+}
+
+model User {
+  id             String    @id @default(cuid())
+  email          String    @unique
+  name           String
+  passwordHash   String?
+  disabledAt     DateTime?
+  /// Bumped to invalidate every dashboard session (e.g. after a password change).
+  sessionVersion Int       @default(0)
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  memberships            Membership[]
+  extensionPairings      ExtensionPairing[]
+  extensionSessions      ExtensionSession[]
+  drafts                 Draft[]
+  feedback               DraftFeedback[]
+  invitesSent            Invite[]           @relation("InvitesSent")
+  opportunitiesContacted Opportunity[]      @relation("OpportunityContactedBy")
+  opportunitiesResolved  Opportunity[]      @relation("OpportunityResolvedBy")
+}
+
+model Workspace {
+  id        String   @id @default(cuid())
+  name      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  memberships   Membership[]
+  brandProfiles BrandProfile[]
+  drafts        Draft[]
+  feedback      DraftFeedback[]
+  auditEvents   AuditEvent[]
+  invites       Invite[]
+  watchlists    WatchList[]
+  conversations Conversation[]
+  opportunities Opportunity[]
+}
+
+/// A single-use invitation link. Only the token's hash is stored; the link is
+/// shown once to the person who created it.
+model Invite {
+  id          String    @id @default(cuid())
+  workspaceId String
+  email       String
+  role        Role
+  tokenHash   String    @unique
+  invitedById String?
+  expiresAt   DateTime
+  acceptedAt  DateTime?
+  revokedAt   DateTime?
+  createdAt   DateTime  @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  invitedBy User?     @relation("InvitesSent", fields: [invitedById], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId, createdAt])
+  @@index([email])
+}
+
+/// Keyword / competitor watchlist. Conversations can be auto-tagged from matched
+/// drafts/captures; users also create them manually. Reddit Data API matching is
+/// gated (see lib/conversations.ts).
+model WatchList {
+  id          String        @id @default(cuid())
+  workspaceId String
+  name        String
+  /// "KEYWORD" watches phrases; "COMPETITOR" watches competitor brand names.
+  type        WatchlistType @default(KEYWORD)
+  /// Terms to watch. For keywords these are the monitored phrases; for
+  /// competitors the brand names. Stored lower-cased and space-trimmed.
+  terms       String[]      @default([])
+  subreddit   String?
+  active      Boolean       @default(true)
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  workspace     Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  conversations Conversation[]
+
+  @@index([workspaceId])
+  @@index([workspaceId, active])
+}
+
+/// A conversation worth tracking: a Reddit thread the user captured or pasted
+/// that may contain a buying signal or request relevant to a brand profile.
+/// Reddit-derived text here shares the same retention policy as draft captured
+/// text (lib/retention.ts purges it after the configured TTL).
+model Conversation {
+  id              String             @id @default(cuid())
+  workspaceId     String
+  watchListId     String?
+  sourceType      ConversationSource
+  sourceUrl       String?
+  sourceSubreddit String?
+  /// The Reddit text the user pasted or captured. Purged (set null) when the
+  /// retention window expires; lib/retention.ts handles the purge.
+  text            String?
+  textChars       Int
+  textExpiresAt   DateTime
+  textPurgedAt    DateTime?
+  title           String?
+  author          String?
+  /// Optional AI-generated one-liner summary. Stored as plain text; never
+  /// used to train models.
+  summary         String?
+  lastCommentAt   DateTime?
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
+
+  workspace     Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  watchList     WatchList?    @relation(fields: [watchListId], references: [id], onDelete: SetNull)
+  opportunities Opportunity[]
+
+  @@index([workspaceId, createdAt])
+  @@index([workspaceId, sourceType])
+  @@index([workspaceId, createdAt, sourceType])
+  @@index([textExpiresAt])
+}
+
+/// An opportunity tied to a conversation — a lead or request worth following up
+/// on. The pipeline is manual: Replyline drafts suggestions; the user decides
+/// whether and how to act.
+model Opportunity {
+  id             String           @id @default(cuid())
+  workspaceId    String
+  conversationId String
+  title          String
+  /// Pipeline stage. Advancing to QUALIFIED/CLOSED/IRRELEVANT sets resolvedAt.
+  stage          OpportunityStage @default(NEW)
+  notes          String           @default("")
+  /// User who last moved this opportunity (for audit).
+  contactedBy    String?
+  lastContactAt  DateTime?
+  resolvedAt     DateTime?
+  /// User who resolved (qualified/closed/irrelevant).
+  resolvedBy     String?
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+
+  workspace       Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  conversation    Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  contactedByUser User?        @relation("OpportunityContactedBy", fields: [contactedBy], references: [id], onDelete: SetNull)
+  resolvedByUser  User?        @relation("OpportunityResolvedBy", fields: [resolvedBy], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId, stage])
+  @@index([workspaceId, createdAt])
+  @@index([conversationId])
+}
+
+model Membership {
+  id          String   @id @default(cuid())
+  workspaceId String
+  userId      String
+  role        Role
+  createdAt   DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, userId])
+  @@index([userId])
+}
+
+/// A voice + fact sheet the AI drafts with. A workspace can hold several
+/// (e.g. one per product or per brand an agency manages).
+model BrandProfile {
+  id                 String     @id @default(cuid())
+  workspaceId        String
+  /// Display name, e.g. "Acme — support voice".
+  name               String
+  /// The brand as it would be mentioned in a reply, e.g. "Acme".
+  brandName          String
+  description        String     @default("")
+  audience           String     @default("")
+  products           String     @default("")
+  tone               String     @default("")
+  writingPreferences String     @default("")
+  /// Statements the AI may rely on; referenced in prompts as F1..Fn.
+  facts              String[]   @default([])
+  /// Phrases a draft must never contain.
+  prohibitedClaims   String[]   @default([])
+  linkPolicy         LinkPolicy @default(NEVER)
+  allowedLinkDomains String[]   @default([])
+  /// Affiliation disclosure to use when a reply mentions the brand.
+  disclosure         String     @default("")
+  archivedAt         DateTime?
+  createdAt          DateTime   @default(now())
+  updatedAt          DateTime   @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  drafts    Draft[]
+
+  @@index([workspaceId])
+}
+
+/// Device-authorization pairing for the browser extension. Only hashes of the
+/// device code are stored; the typed user code is short-lived.
+model ExtensionPairing {
+  id             String        @id @default(cuid())
+  deviceCodeHash String        @unique
+  /// Normalized (no dash, upper case) 8-character code the user types.
+  userCode       String
+  status         PairingStatus @default(PENDING)
+  clientLabel    String
+  userId         String?
+  expiresAt      DateTime
+  decidedAt      DateTime?
+  createdAt      DateTime      @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userCode, status])
+}
+
+/// A signed-in browser extension. The bearer token itself is never stored.
+model ExtensionSession {
+  id         String    @id @default(cuid())
+  userId     String
+  tokenHash  String    @unique
+  label      String
+  createdAt  DateTime  @default(now())
+  lastUsedAt DateTime  @default(now())
+  expiresAt  DateTime
+  revokedAt  DateTime?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model Draft {
+  id                    String       @id @default(cuid())
+  workspaceId           String
+  brandProfileId        String
+  /// Null once the author's account is deleted; the draft stays with the workspace.
+  createdById           String?
+  channel               DraftChannel
+  /// Reddit text the user captured. Purged (set null) at capturedTextExpiresAt.
+  capturedText          String?
+  capturedTextChars     Int
+  capturedTextExpiresAt DateTime
+  capturedTextPurgedAt  DateTime?
+  sourceUrl             String?
+  sourceSubreddit       String?
+  /// DraftOptions (shared/contracts.ts) plus the optional reviewer instruction.
+  options               Json
+  generatedText         String
+  currentText           String
+  /// One short sentence from the model for the reviewer.
+  notes                 String       @default("")
+  /// ValidationIssue[] for currentText (shared/draft-validation.ts).
+  validationIssues      Json
+  aiProvider            String
+  model                 String
+  promptVersion         String
+  /// True when the service asked the model for one automatic revision.
+  revised               Boolean      @default(false)
+  regeneratedFromId     String?
+  editedAt              DateTime?
+  copyCount             Int          @default(0)
+  lastCopiedAt          DateTime?
+  createdAt             DateTime     @default(now())
+  updatedAt             DateTime     @updatedAt
+
+  workspace       Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  brandProfile    BrandProfile    @relation(fields: [brandProfileId], references: [id], onDelete: NoAction)
+  createdBy       User?           @relation(fields: [createdById], references: [id], onDelete: SetNull)
+  regeneratedFrom Draft?          @relation("Regenerations", fields: [regeneratedFromId], references: [id], onDelete: SetNull)
+  regenerations   Draft[]         @relation("Regenerations")
+  feedback        DraftFeedback[]
+
+  @@index([workspaceId, createdAt])
+  @@index([brandProfileId, createdAt])
+  @@index([capturedTextExpiresAt])
+}
+
+model DraftFeedback {
+  id          String         @id @default(cuid())
+  workspaceId String
+  draftId     String
+  userId      String
+  rating      FeedbackRating
+  reasons     String[]       @default([])
+  note        String         @default("")
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  draft     Draft     @relation(fields: [draftId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([draftId, userId])
+  @@index([workspaceId, createdAt])
+}
+
+/// Important actions and product analytics. Metadata only — never Reddit text,
+/// draft text, notes, tokens, or email addresses (lib/audit.ts enforces this).
+model AuditEvent {
+  id          String   @id @default(cuid())
+  workspaceId String?
+  actorUserId String?
+  action      String
+  targetType  String?
+  targetId    String?
+  metadata    Json     @default("{}")
+  createdAt   DateTime @default(now())
+
+  workspace Workspace? @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, createdAt])
+  @@index([workspaceId, action, createdAt])
+}
+
+/// Fixed-window counters for rate limits and quotas (lib/rate-limit.ts).
+model RateLimitCounter {
+  key         String
+  windowStart DateTime
+  count       Int      @default(0)
+
+  @@id([key, windowStart])
+  @@index([windowStart])
+}

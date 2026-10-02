@@ -1,0 +1,27 @@
+# dependencies
+node_modules/
+
+# next.js
+.next/
+out/
+next-env.d.ts
+*.tsbuildinfo
+
+# prisma generated client
+lib/generated/
+
+# extension build output
+extension/dist/
+extension/*.zip
+
+# env files (keep the committed examples and the non-secret test config)
+.env
+.env.local
+.env.*.local
+extension/.env
+extension/.env.local
+
+# misc
+coverage/
+*.log
+.DS_Store

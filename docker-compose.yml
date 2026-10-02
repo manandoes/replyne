@@ -1,0 +1,26 @@
+# Local Postgres for development and tests.
+#   npm run db:up     start it (host port 5433, so it doesn't clash with other projects on 5432)
+#   npm run db:down   stop it (data stays in the named volume)
+# The test database (replyline_test) is created automatically by vitest.global-setup.ts.
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: replyline-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: replyline
+      POSTGRES_PASSWORD: replyline
+      POSTGRES_DB: replyline
+    ports:
+      - "5433:5432"
+    volumes:
+      - replyline-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U replyline -d replyline"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  replyline-postgres-data:
