@@ -25,3 +25,11 @@ extension/.env.local
 coverage/
 *.log
 .DS_Store
+
+# docs / plans (tracked in pasted content list)
+Architecture_Revised.md
+CLAUDE.md
+Claude_Code_Master_Builder_Prompt_Revised.md
+DEPLOYMENT.md
+IMPLEMENTATION_PLAN.md
+PRD_Revised.md
